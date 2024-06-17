@@ -2,7 +2,16 @@
 scripts for block device IO analysis
 
 
-## print histogram of block sizes from a blkparse outputfile
+## collect data
+```bash
+# trace block io for 60s
+blktrace -d /dev/nvmeXn1 -w 60
+
+# parse trace files
+blkparse nvmeXn1 -f "%5T.%9t, %p, %C, %a, %S, %n, %N\n"  -a write -o output.txt
+```
+
+## print histogram of block sizes from a blkparse output file
 ```
 $ grep 'C' output.txt | ./blkhist.awk
 block_size  	count     	pct.
@@ -11,7 +20,7 @@ block_size  	count     	pct.
 65536       	77328     	100.00%
 ```
 
-## print random/sequential IO pattern from a blkparse outputfile
+## print random/sequential IO pattern from a blkparse output file
 ```
 $ grep -w 'C' output.txt | python3 blk_analyzer.py
 IO Size: 65535 bytes
