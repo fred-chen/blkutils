@@ -8,7 +8,7 @@ scripts for block device IO analysis
 blktrace -d /dev/nvmeXn1 -w 60
 
 # parse trace files
-blkparse nvmeXn1 -f "%5T.%9t, %p, %C, %a, %S, %n, %N\n"  -a write -o output.txt
+blkparse nvmeXn1 -f "%5T.%9t, %p, %C, %a, %3d, %S, %n, %N\n"  -o output.txt
 ```
 
 ## print histogram of block sizes from a blkparse output file
@@ -33,4 +33,30 @@ IO Size: 65536 bytes
 
 Overall Sequential IO: 70838 (91.60%)
 Overall Random IO: 6492 (8.40%)
+Total IO count: 77330
+```
+
+## filter IO sizes with blk_analyzer.py
+Use the `--filter` parameter to filter IO sizes:
+
+```bash
+# filter for specific IO size
+$ grep -w 'C' output.txt | python3 blk_analyzer.py --filter 4096
+
+# filter for IO sizes greater than a specific value
+$ grep -w 'C' output.txt | python3 blk_analyzer.py --filter ">65536"
+
+# filter for IO sizes with percentage greater than a threshold
+$ grep -w 'C' output.txt | python3 blk_analyzer.py --filter "percentage>10"
+```
+
+## group by process with blk_analyzer.py
+Use the `-c` or `--by-process` parameter to group and summarize by process name:
+
+```bash
+# analyze IO by process
+$ grep -w 'C' output.txt | python3 blk_analyzer.py -c
+
+# analyze IO by process with filter
+$ grep -w 'C' output.txt | python3 blk_analyzer.py -c --filter "percentage>10"
 ```

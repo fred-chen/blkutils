@@ -1,4 +1,4 @@
-#!/usr/bin/gawk -f
+#!/usr/bin/env gawk -f
 #
 # print a statistics of block sizes, counts, and percentage from a blkparse output
 # record format: "%5T.%9t, %p, %C, %a, %S, %n, %N\n"
@@ -14,9 +14,9 @@ BEGIN {
 };
 
 {
-    if ($7 ~ /[0-9]+$/)
+    if ($8 ~ /[0-9]+$/ && $8 > 0)
     {
-        a[$7] += 1; total += 1;
+        a[$8] += 1; total += 1;
     }
 };
 
