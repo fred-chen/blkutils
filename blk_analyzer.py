@@ -126,25 +126,170 @@ def print_by_size(size, io_stats, grand_total_io, by_process=False):
             print(f"    Random: {op_stats['random']} ({rand_percentage:.2f}%)")
     print()
 
+def parse_blktrace_line(line):
+    parts = line.strip().split(", ")
+    if len(parts) != 8:
+        return None
+
+    try:
+        return {
+            "timestamp": float(parts[0]),
+            "pid": int(parts[1]),
+            "command_name": parts[2],
+            "io_type": parts[3].strip(),
+            "op_type": parts[4].strip(),
+            "lba": int(parts[5]),
+            "block_count": int(parts[6]),
+            "io_size": int(parts[7]),
+        }
+    except ValueError:
+        return None
+
+def stat_record_matches_filter(record, filter_arg):
+    if filter_arg is None:
+        return True
+    if isinstance(filter_arg, (int, float)):
+        return record["io_size"] == filter_arg
+    if isinstance(filter_arg, str) and filter_arg.startswith(">"):
+        try:
+            return record["io_size"] > int(filter_arg[1:])
+        except ValueError:
+            return True
+    return True
+
+def print_stat_report(input_lines, filter_arg=None):
+    all_records = []
+    records = []
+    has_complete = False
+    has_dispatch = False
+
+    for line in input_lines:
+        record = parse_blktrace_line(line)
+        if record is None or record["io_size"] == 0:
+            continue
+        all_records.append(record)
+
+    if isinstance(filter_arg, str) and "percentage" in filter_arg.lower() and ">" in filter_arg:
+        try:
+            percentage = float(filter_arg.split(">")[1].replace("%", "").strip())
+            total_io = len(all_records)
+            size_counts = {}
+            for record in all_records:
+                size_counts[record["io_size"]] = size_counts.get(record["io_size"], 0) + 1
+            valid_sizes = {size for size, count in size_counts.items() if total_io and count / total_io * 100 > percentage}
+            records = [record for record in all_records if record["io_size"] in valid_sizes]
+        except (IndexError, ValueError):
+            records = all_records
+    else:
+        records = [record for record in all_records if stat_record_matches_filter(record, filter_arg)]
+
+    for record in records:
+        if record["io_type"] == "C":
+            has_complete = True
+        elif record["io_type"] == "D":
+            has_dispatch = True
+
+    if not records:
+        return
+
+    count_action = "C" if has_complete else "D" if has_dispatch else None
+    track_queue_depth = has_dispatch and has_complete
+    stats = {}
+    qdepth_area = {}
+    util_time = {}
+    active = 0
+    last_ts = records[0]["timestamp"]
+
+    def get_bucket(ts):
+        return int(ts)
+
+    def ensure_bucket(bucket):
+        if bucket not in stats:
+            stats[bucket] = {
+                "read_ios": 0,
+                "write_ios": 0,
+                "read_kb": 0.0,
+                "write_kb": 0.0,
+                "read_req_size": 0,
+                "write_req_size": 0,
+            }
+            qdepth_area[bucket] = 0.0
+            util_time[bucket] = 0.0
+
+    def add_interval(start, end, depth):
+        if end <= start:
+            return
+        current = start
+        while current < end:
+            bucket = get_bucket(current)
+            ensure_bucket(bucket)
+            bucket_end = min(end, bucket + 1.0)
+            duration = bucket_end - current
+            qdepth_area[bucket] += depth * duration
+            if depth > 0:
+                util_time[bucket] += duration
+            current = bucket_end
+
+    for record in records:
+        ts = record["timestamp"]
+        if track_queue_depth:
+            add_interval(last_ts, ts, active)
+
+        io_action = record["io_type"]
+        if track_queue_depth:
+            if io_action == "D":
+                active += 1
+            elif io_action == "C" and active > 0:
+                active -= 1
+
+        if count_action is None or io_action == count_action:
+            bucket = get_bucket(ts)
+            ensure_bucket(bucket)
+            op_category = get_op_type(record["op_type"])
+            io_size = record["io_size"]
+            if op_category == "Read":
+                stats[bucket]["read_ios"] += 1
+                stats[bucket]["read_kb"] += io_size / 1024
+                stats[bucket]["read_req_size"] += io_size
+            elif op_category == "Write":
+                stats[bucket]["write_ios"] += 1
+                stats[bucket]["write_kb"] += io_size / 1024
+                stats[bucket]["write_req_size"] += io_size
+
+        last_ts = ts
+
+    print("Device            r/s     w/s   rkB/s   wkB/s   rMB/s   wMB/s  req/s  aqu-sz rareq-sz wareq-sz  %util")
+    for bucket in sorted(stats.keys()):
+        stat = stats[bucket]
+        read_ios = stat["read_ios"]
+        write_ios = stat["write_ios"]
+        read_kb = stat["read_kb"]
+        write_kb = stat["write_kb"]
+        total_ios = read_ios + write_ios
+        read_mb = read_kb / 1024
+        write_mb = write_kb / 1024
+        avg_qdepth = qdepth_area.get(bucket, 0.0) if track_queue_depth else total_ios
+        read_avg_req_kb = (stat["read_req_size"] / 1024 / read_ios) if read_ios else 0.0
+        write_avg_req_kb = (stat["write_req_size"] / 1024 / write_ios) if write_ios else 0.0
+        util = min(util_time.get(bucket, 0.0) * 100, 100.0)
+        print(f"{bucket:>6}s {read_ios:10.2f} {write_ios:7.2f} {read_kb:7.2f} {write_kb:7.2f} {read_mb:7.2f} {write_mb:7.2f} {total_ios:6.2f} {avg_qdepth:7.2f} {read_avg_req_kb:8.2f} {write_avg_req_kb:8.2f} {util:6.2f}")
+
 def analyze_blktrace(input_lines, filter_arg=None, by_process=False):
     io_stats = {}
     last_lba = None
     overall_stats = {"sequential": 0, "random": 0}
 
     for line in input_lines:
-        parts = line.strip().split(", ")
-        if len(parts) != 8:
+        record = parse_blktrace_line(line)
+        if record is None:
             continue
 
         # 解析字段
-        timestamp = float(parts[0])
-        pid = int(parts[1])
-        command_name = parts[2]
-        io_type = parts[3]
-        op_type = parts[4]
-        lba = int(parts[5])
-        block_count = int(parts[6])
-        io_size = int(parts[7])
+        command_name = record["command_name"]
+        op_type = record["op_type"]
+        lba = record["lba"]
+        block_count = record["block_count"]
+        io_size = record["io_size"]
 
         # 忽略 IO size 为 0 的情况
         if io_size == 0:
@@ -235,6 +380,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Analyze block IO traces.')
     parser.add_argument('--filter', help='Filter IO sizes: specific size (e.g., 4096), greater than (e.g., >4096), or percentage greater (e.g., percentage>10)')
     parser.add_argument('-c', '--by-process', action='store_true', help='Group and summarize by process name')
+    parser.add_argument('-s', '--stat', action='store_true', help='Print per-second statistics in an iostat -xm like format')
     args = parser.parse_args()
 
     filter_arg = args.filter
@@ -244,4 +390,7 @@ if __name__ == "__main__":
         filter_arg = int(filter_arg)
 
     input_lines = sys.stdin.readlines()
-    analyze_blktrace(input_lines, filter_arg, args.by_process)
+    if args.stat:
+        print_stat_report(input_lines, filter_arg)
+    else:
+        analyze_blktrace(input_lines, filter_arg, args.by_process)
