@@ -1,4 +1,4 @@
-#!/usr/bin/env gawk -f
+#!/usr/bin/env -S gawk -f
 #
 # print a statistics of block sizes, counts, and percentage from a blkparse output
 # record format: "%5T.%9t, %p, %C, %a, %S, %n, %N\n"
