@@ -297,12 +297,29 @@ def build_percentage_filter_sizes(input_lines, percentage):
     return {size for size, count in size_counts.items() if total_io and count / total_io * 100 > percentage}
 
 def parse_percentage_filter(filter_arg):
-    if not isinstance(filter_arg, str) or not filter_arg.startswith(">") or not filter_arg.endswith("%"):
+    if not isinstance(filter_arg, str) or not filter_arg.startswith("pct>") or not filter_arg.endswith("%"):
         return None
     try:
-        return float(filter_arg[1:-1])
+        return float(filter_arg[4:-1])
     except ValueError:
         return None
+
+def parse_count_filter(filter_arg):
+    if not isinstance(filter_arg, str) or not filter_arg.startswith("count>"):
+        return None
+    try:
+        return int(filter_arg[6:])
+    except ValueError:
+        return None
+
+def build_count_filter_sizes(input_lines, count_threshold):
+    size_counts = {}
+    for line in input_lines:
+        record = parse_blktrace_line(line)
+        if record is None or record["io_size"] == 0 or record["io_type"] != "C":
+            continue
+        size_counts[record["io_size"]] = size_counts.get(record["io_size"], 0) + 1
+    return {size for size, count in size_counts.items() if count > count_threshold}
 
 def build_output_filter(input_lines, filter_arg, use_completion_counts=False):
     percentage = parse_percentage_filter(filter_arg)
@@ -311,6 +328,14 @@ def build_output_filter(input_lines, filter_arg, use_completion_counts=False):
             valid_sizes = build_percentage_filter_sizes(input_lines, percentage)
             return lambda record: record["io_size"] in valid_sizes
         return lambda record: True
+
+    count_threshold = parse_count_filter(filter_arg)
+    if count_threshold is not None:
+        if use_completion_counts:
+            valid_sizes = build_count_filter_sizes(input_lines, count_threshold)
+            return lambda record: record["io_size"] in valid_sizes
+        return lambda record: True
+
     return lambda record: stat_record_matches_filter(record, filter_arg)
 
 def print_stat_report(input_lines, filter_arg=None):
@@ -328,15 +353,16 @@ def print_stat_report(input_lines, filter_arg=None):
     count_records = [record for record in all_records if record["io_type"] == "C"]
 
     percentage = parse_percentage_filter(filter_arg)
-    if percentage is not None:
-        try:
-            size_counts = {}
-            for record in count_records:
-                size_counts[record["io_size"]] = size_counts.get(record["io_size"], 0) + 1
-            total_io = len(count_records)
+    count_threshold = parse_count_filter(filter_arg)
+    if percentage is not None or count_threshold is not None:
+        size_counts = {}
+        for record in count_records:
+            size_counts[record["io_size"]] = size_counts.get(record["io_size"], 0) + 1
+        total_io = len(count_records)
+        if percentage is not None:
             valid_sizes = {size for size, count in size_counts.items() if total_io and count / total_io * 100 > percentage}
-        except (IndexError, ValueError):
-            valid_sizes = None
+        else:
+            valid_sizes = {size for size, count in size_counts.items() if count > count_threshold}
     else:
         valid_sizes = None
 
@@ -424,7 +450,7 @@ def analyze_blktrace(input_lines, filter_arg=None, by_process=False, show_latenc
     pending_insert = {}
     last_lba_by_op = {}
     last_lba_by_op_fallback = {}
-    overall_stats = {"sequential": 0, "random": 0}
+    overall_stats = {}
 
     def ensure_stats(io_size, op_category):
         if io_size not in io_stats:
@@ -456,7 +482,9 @@ def analyze_blktrace(input_lines, filter_arg=None, by_process=False, show_latenc
             op_stats[io_class] += 1
             if service_us is not None:
                 op_stats[f"{io_class}_latencies"].append(service_us)
-        overall_stats[io_class] += 1
+        if op_category not in overall_stats:
+            overall_stats[op_category] = {"sequential": 0, "random": 0}
+        overall_stats[op_category][io_class] += 1
 
     for line in input_lines:
         record = parse_blktrace_line(line)
@@ -498,13 +526,14 @@ def analyze_blktrace(input_lines, filter_arg=None, by_process=False, show_latenc
                     io_stats[io_size][item_op_type][f"{io_class}_latencies"].append(service_us)
 
     # 计算总 IO 数
-    grand_total_io = overall_stats['sequential'] + overall_stats['random']
+    grand_total_io = sum(stats["sequential"] + stats["random"] for stats in overall_stats.values())
     if grand_total_io == 0:
         print("No valid IO records found.")
         return
 
     # 处理筛选
     percentage = parse_percentage_filter(filter_arg)
+    count_threshold = parse_count_filter(filter_arg)
     filtered_sizes = []
     for size in sorted(io_stats.keys()):
         # 计算该 size 的总 IO 数
@@ -525,9 +554,13 @@ def analyze_blktrace(input_lines, filter_arg=None, by_process=False, show_latenc
                 filtered_sizes.append(size)
         elif isinstance(filter_arg, str):
             if percentage is not None:
-                # 百分比大于某个值：例如 >1%
+                # 百分比大于某个值：例如 pct>1%
                 size_percent = (total_for_size / grand_total_io) * 100
                 if size_percent > percentage:
+                    filtered_sizes.append(size)
+            elif count_threshold is not None:
+                # IO 数量大于某个值：例如 count>3
+                if total_for_size > count_threshold:
                     filtered_sizes.append(size)
             elif filter_arg.startswith(">"):
                 # 大于某个具体值：>4096
@@ -538,37 +571,73 @@ def analyze_blktrace(input_lines, filter_arg=None, by_process=False, show_latenc
                 except ValueError:
                     pass
 
-    # 输出结果
-    for size in filtered_sizes:
-        print_by_size(size, io_stats, grand_total_io, by_process, show_latency)
+    # 默认模式只输出 IO size 汇总表；-l/-c 保留详细输出
+    if by_process or show_latency:
+        for size in filtered_sizes:
+            print_by_size(size, io_stats, grand_total_io, by_process, show_latency)
 
-    print(f"Overall Sequential IO: {overall_stats['sequential']} ({overall_stats['sequential']/grand_total_io*100:.2f}%)")
-    print(f"Overall Random IO: {overall_stats['random']} ({overall_stats['random']/grand_total_io*100:.2f}%)")
-    print(f"Total IO count: {grand_total_io}\n")
-    
     # 打印 IO size 分布汇总表
     if not by_process:
-        print(f"{'IO Size':>12} {'Count':>10} {'Pct':>8} {'Seq%':>8} {'Rnd%':>8}")
-        print(f"{'-' * 12:>12} {'-' * 10:>10} {'-' * 8:>8} {'-' * 8:>8} {'-' * 8:>8}")
+        print(f"{'IO Size':>12} {'Count':>10} {'Pct':>8} {'READ Seq%':>10} {'READ Rnd%':>10} {'WRITE Seq%':>11} {'WRITE Rnd%':>11}")
+        print(f"{'-' * 12:>12} {'-' * 10:>10} {'-' * 8:>8} {'-' * 10:>10} {'-' * 10:>10} {'-' * 11:>11} {'-' * 11:>11}")
+        summary_total = 0
+        summary_read_seq = 0
+        summary_read_rnd = 0
+        summary_write_seq = 0
+        summary_write_rnd = 0
         for size in filtered_sizes:
             size_total = 0
-            seq_total = 0
-            rnd_total = 0
+            read_seq = 0
+            read_rnd = 0
+            write_seq = 0
+            write_rnd = 0
             for op_type in io_stats[size]:
                 op_stats = io_stats[size][op_type]
-                size_total += op_stats["sequential"] + op_stats["random"]
-                seq_total += op_stats["sequential"]
-                rnd_total += op_stats["random"]
+                op_total = op_stats["sequential"] + op_stats["random"]
+                size_total += op_total
+                if op_type == "Read":
+                    read_seq += op_stats["sequential"]
+                    read_rnd += op_stats["random"]
+                elif op_type == "Write":
+                    write_seq += op_stats["sequential"]
+                    write_rnd += op_stats["random"]
+            summary_total += size_total
+            summary_read_seq += read_seq
+            summary_read_rnd += read_rnd
+            summary_write_seq += write_seq
+            summary_write_rnd += write_rnd
             size_pct = (size_total / grand_total_io) * 100 if grand_total_io else 0
-            seq_pct = (seq_total / size_total) * 100 if size_total else 0
-            rnd_pct = (rnd_total / size_total) * 100 if size_total else 0
-            print(f"{size:>12} {size_total:>10} {size_pct:>7.2f}% {seq_pct:>7.2f}% {rnd_pct:>7.2f}%")
+            read_seq_pct = (read_seq / size_total) * 100 if size_total else 0
+            read_rnd_pct = (read_rnd / size_total) * 100 if size_total else 0
+            write_seq_pct = (write_seq / size_total) * 100 if size_total else 0
+            write_rnd_pct = (write_rnd / size_total) * 100 if size_total else 0
+            print(f"{size:>12} {size_total:>10} {size_pct:>7.2f}% {read_seq_pct:>9.2f}% {read_rnd_pct:>9.2f}% {write_seq_pct:>10.2f}% {write_rnd_pct:>10.2f}%")
+        total_pct = (summary_total / grand_total_io) * 100 if grand_total_io else 0
+        total_read_seq_pct = (summary_read_seq / summary_total) * 100 if summary_total else 0
+        total_read_rnd_pct = (summary_read_rnd / summary_total) * 100 if summary_total else 0
+        total_write_seq_pct = (summary_write_seq / summary_total) * 100 if summary_total else 0
+        total_write_rnd_pct = (summary_write_rnd / summary_total) * 100 if summary_total else 0
+        print(f"{'-' * 12:>12} {'-' * 10:>10} {'-' * 8:>8} {'-' * 10:>10} {'-' * 10:>10} {'-' * 11:>11} {'-' * 11:>11}")
+        print(f"{'Total':>12} {summary_total:>10} {total_pct:>7.2f}% {total_read_seq_pct:>9.2f}% {total_read_rnd_pct:>9.2f}% {total_write_seq_pct:>10.2f}% {total_write_rnd_pct:>10.2f}%")
         print()
+
+    print(f"{'Overall Pattern':<24} {'Count':>10} {'Pct':>8}")
+    print(f"{'-' * 24} {'-' * 10} {'-' * 8}")
+    for op_category in ("Read", "Write", "Discard", "Other"):
+        if op_category not in overall_stats:
+            continue
+        for io_class, label in (("sequential", "Sequential"), ("random", "Random")):
+            count = overall_stats[op_category][io_class]
+            if count == 0:
+                continue
+            pct = (count / grand_total_io) * 100
+            print(f"{'Overall ' + label + ' ' + op_category:<24} {count:>10} {pct:>7.2f}%")
+    print(f"{'Total IO count':<24} {grand_total_io:>10}\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Analyze block IO traces.')
     parser.add_argument('-f', '--file', help='Read blkparse output from file instead of stdin')
-    parser.add_argument('--filter', help='Filter IO sizes: specific size (e.g., 4096), greater than (e.g., >4096), or percentage greater (e.g., percentage>10)')
+    parser.add_argument('--filter', help='Filter IO sizes: specific size (e.g., 4096), greater than size (e.g., >4096), percentage greater (e.g., pct>1%), or count greater (e.g., count>3)')
     parser.add_argument('-c', '--by-process', action='store_true', help='Group and summarize by process name')
     parser.add_argument('-x', '--stat', action='store_true', help='Print per-second statistics in an iostat -xm like format')
     parser.add_argument('-s', '--start', type=int, help='Start second for analysis range, inclusive')

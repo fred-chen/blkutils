@@ -25,23 +25,20 @@ By default, `blk_analyzer.py` uses `D` events for fast issued IO size and random
 
 ```
 $ python3 blk_analyzer.py -f output.txt
-IO Size: 4096 bytes (count: 5161, 18.98% of all IO, R:7.32%/W:92.68%)
-    Pattern                 Count      Pct
-    ------------------ ---------- --------
-    Sequential Read             5    0.10%
-    Random Read               373    7.23%
-    Sequential Write         3088   59.83%
-    Random Write             1695   32.84%
+     IO Size      Count      Pct  READ Seq%  READ Rnd%  WRITE Seq%  WRITE Rnd%
+------------ ---------- -------- ---------- ---------- ----------- -----------
+        4096       5161   18.98%      0.10%      7.23%      59.83%      32.84%
+        8192       9052   33.30%      0.02%     98.72%       0.34%       0.92%
+------------ ---------- -------- ---------- ---------- ----------- -----------
+       Total      14213   52.28%      0.05%     65.50%      21.94%      12.51%
 
-Overall Sequential IO: 5763 (21.20%)
-Overall Random IO: 21422 (78.80%)
-Total IO count: 27185
-
-     IO Size      Count      Pct     Seq%     Rnd%
------------- ---------- -------- -------- --------
-        4096       5161   18.98%    59.93%   40.07%
-        8192       9052   33.30%     0.24%   99.76%
-       12288      17708    3.60%   79.03%   20.97%
+Overall Pattern               Count      Pct
+------------------------ ---------- --------
+Overall Sequential Read        1168    4.30%
+Overall Random Read           14090   51.83%
+Overall Sequential Write       4595   16.90%
+Overall Random Write           7332   26.97%
+Total IO count                27185
 ```
 
 ## print IO latency from a blkparse output file
@@ -69,7 +66,10 @@ $ python3 blk_analyzer.py -f output.txt --filter 4096
 $ python3 blk_analyzer.py -f output.txt --filter ">65536"
 
 # filter for IO sizes with percentage greater than a threshold
-$ python3 blk_analyzer.py -f output.txt --filter ">1%"
+$ python3 blk_analyzer.py -f output.txt --filter "pct>1%"
+
+# filter for IO sizes with count greater than a threshold
+$ python3 blk_analyzer.py -f output.txt --filter "count>3"
 ```
 
 ## group by process with blk_analyzer.py
@@ -80,7 +80,7 @@ Use the `-c` or `--by-process` parameter to group and summarize by process name.
 $ python3 blk_analyzer.py -f output.txt -c
 
 # analyze IO by process with filter
-$ python3 blk_analyzer.py -f output.txt -c --filter ">1%"
+$ python3 blk_analyzer.py -f output.txt -c --filter "pct>1%"
 ```
 
 ## print per-second statistics with blk_analyzer.py
@@ -91,7 +91,7 @@ Use the `-x` or `--stat` parameter to print per-second statistics in an `iostat 
 $ python3 blk_analyzer.py -f output.txt -x
 
 # print per-second statistics with IO size filter
-$ python3 blk_analyzer.py -f output.txt -x --filter ">1%"
+$ python3 blk_analyzer.py -f output.txt -x --filter "pct>1%"
 
 # print per-second statistics for second 10 to second 20
 $ python3 blk_analyzer.py -f output.txt -x -s 10 -e 20
